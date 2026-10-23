@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.MediaPlayer
+import android.net.Uri
 import android.graphics.Color
 import android.media.AudioAttributes
 import android.media.Ringtone
@@ -27,6 +29,7 @@ import java.util.Locale
 
 class AlertActivity : Activity() {
     private var ringtone: Ringtone? = null
+    private var alarmPlayer: MediaPlayer? = null
     private var tts: TextToSpeech? = null
     private var vibrator: Vibrator? = null
     private var isActivation = true
@@ -66,13 +69,31 @@ class AlertActivity : Activity() {
     }
 
     private fun startAlert() {
-        val uri = if (isActivation) RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM) else RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-        try {
-            ringtone = RingtoneManager.getRingtone(this, uri)?.apply {
-                if (Build.VERSION.SDK_INT >= 28) isLooping = isActivation
-                play()
+        if (isActivation) {
+            // App-specific siren; does not depend on the phone's default alarm tone.
+            try {
+                alarmPlayer = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                    setDataSource(this@AlertActivity, activationSoundUri(this@AlertActivity))
+                    isLooping = true
+                    prepare()
+                    start()
+                }
+            } catch (_: Exception) {
+                try { alarmPlayer?.release() } catch (_: Exception) { }
+                alarmPlayer = null
             }
-        } catch (_: Exception) { }
+        } else {
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            try {
+                ringtone = RingtoneManager.getRingtone(this, uri)?.apply { play() }
+            } catch (_: Exception) { }
+        }
         vibrator = getSystemService(VIBRATOR_SERVICE) as? Vibrator
         if (isActivation) {
             val pattern = longArrayOf(0, 700, 250, 700, 250, 1200)
@@ -90,6 +111,9 @@ class AlertActivity : Activity() {
 
     private fun stopAlert() {
         try { ringtone?.stop() } catch (_: Exception) { }
+        try { alarmPlayer?.stop() } catch (_: Exception) { }
+        try { alarmPlayer?.release() } catch (_: Exception) { }
+        alarmPlayer = null
         try { vibrator?.cancel() } catch (_: Exception) { }
         try { tts?.stop(); tts?.shutdown() } catch (_: Exception) { }
     }
@@ -107,7 +131,11 @@ class AlertActivity : Activity() {
         private const val EXTRA_ACTIVE = "active"
         private const val EXTRA_MESSAGE = "message"
         private const val EXTRA_SENDER = "sender"
-        private const val CHANNEL = "jafurah_emergency_alerts"
+        private const val CHANNEL_ACTIVATED = "jafurah_activated_alerts_v2"
+        private const val CHANNEL_DEACTIVATED = "jafurah_deactivated_alerts_v2"
+
+        private fun activationSoundUri(context: Context): Uri =
+            Uri.parse("android.resource://${context.packageName}/raw/jafurah_activated_alarm")
 
         fun launch(context: Context, active: Boolean, message: String, sender: String) {
             ensureChannel(context)
@@ -118,7 +146,8 @@ class AlertActivity : Activity() {
             val pending = PendingIntent.getActivity(context, if (active) 11 else 12, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val title = if (active) "🚨 SHELTER-IN-PLACE ACTIVATED" else "🟢 SHELTER-IN-PLACE DEACTIVATED"
-            val notification = NotificationCompat.Builder(context, CHANNEL)
+            val channelId = if (active) CHANNEL_ACTIVATED else CHANNEL_DEACTIVATED
+            val notification = NotificationCompat.Builder(context, channelId)
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
                 .setContentTitle(title)
                 .setContentText(if (active) "Emergency alert received — open immediately" else "All-clear message received")
@@ -139,14 +168,40 @@ class AlertActivity : Activity() {
         private fun ensureChannel(context: Context) {
             if (Build.VERSION.SDK_INT >= 26) {
                 val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                val channel = NotificationChannel(CHANNEL, "Jafurah Emergency Alerts", NotificationManager.IMPORTANCE_HIGH).apply {
-                    description = "Urgent shelter-in-place activation and all-clear alerts"
+                val alarmAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+                val notificationAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+
+                // New channel IDs let existing installs receive these channel sound settings.
+                val activated = NotificationChannel(
+                    CHANNEL_ACTIVATED,
+                    "Jafurah Shelter Activation Alarm",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Distinctive looping shelter-in-place activation alarm"
                     lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
                     enableVibration(true)
                     vibrationPattern = longArrayOf(0, 700, 250, 700, 250, 1200)
-                    setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM), AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).build())
+                    setSound(activationSoundUri(context), alarmAttributes)
                 }
-                manager.createNotificationChannel(channel)
+                val deactivated = NotificationChannel(
+                    CHANNEL_DEACTIVATED,
+                    "Jafurah All-Clear Alerts",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Shelter-in-place deactivation and all-clear messages"
+                    lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 350)
+                    setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION), notificationAttributes)
+                }
+                manager.createNotificationChannel(activated)
+                manager.createNotificationChannel(deactivated)
             }
         }
     }
